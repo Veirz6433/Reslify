@@ -12,6 +12,7 @@
   "type": "commonjs",
   "dependencies": {
     "b4a": "^1.7.3",
+    "cassandra-driver": "^4.8.0",
     "express": "^5.1.0",
     "hypercore-crypto": "^3.6.1",
     "hyperswarm": "^4.14.2",

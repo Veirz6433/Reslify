@@ -7,8 +7,7 @@ const { getMimeType } = require('../utils/mime-types');
 class DHTService {
   constructor() {
     this.swarm = new Hyperswarm();
-    this.storedFiles = new Map();
-    this.fileIdToPath = new Map();
+    this.activeTopics = new Map();
     this.setupConnectionHandler();
     console.log('🌐 DHT Storage Node initialized');
   }
@@ -20,17 +19,12 @@ class DHTService {
     
     const topic = crypto.createHash('sha256').update(fileId).digest();
     
-    const fileMetadata = {
-      filePath,
-      fileName,
+    this.activeTopics.set(fileId, {
       topic,
-      size: fileSize,
-      uploadedAt: new Date().toISOString(),
-      serverAddress: SERVER_ADDRESS
-    };
-    
-    this.storedFiles.set(fileId, fileMetadata);
-    this.fileIdToPath.set(fileId, filePath);
+      fileName,
+      filePath,
+      announcedAt: new Date().toISOString()
+    });
     
     console.log(`   📦 Topic: ${topic.toString('hex').substring(0, 20)}...`);
     console.log(`   📍 Server Address: ${SERVER_ADDRESS}`);
@@ -48,18 +42,6 @@ class DHTService {
     };
   }
 
-  getFilePath(fileId) {
-    return this.fileIdToPath.get(fileId);
-  }
-
-  getFileMetadata(fileId) {
-    return this.storedFiles.get(fileId);
-  }
-
-  hasFile(fileId) {
-    return this.storedFiles.has(fileId);
-  }
-
   setupConnectionHandler() {
     this.swarm.on('connection', (conn) => {
       console.log('\n🔗 DHT Client connected! Processing download request...');
@@ -73,8 +55,8 @@ class DHTService {
           const fileId = requestData.trim();
           console.log(`   📥 Requested File ID: ${fileId}`);
           
-          if (this.storedFiles.has(fileId)) {
-            const fileInfo = this.storedFiles.get(fileId);
+          if (this.activeTopics.has(fileId)) {
+            const fileInfo = this.activeTopics.get(fileId);
             
             try {
               const fileContent = fs.readFileSync(fileInfo.filePath);
@@ -108,7 +90,7 @@ class DHTService {
               message: `No file with ID: ${fileId}`
             };
             conn.write(JSON.stringify(errorResponse));
-            console.log(`   ❌ File not found: ${fileId}`);
+            console.log(`   ❌ File not found in DHT: ${fileId}`);
           }
           
           setTimeout(() => conn.end(), 100);
@@ -121,20 +103,6 @@ class DHTService {
         }
       });
     });
-  }
-
-  getStoredFilesInfo() {
-    const filesInfo = [];
-    for (const [fileId, info] of this.storedFiles) {
-      filesInfo.push({
-        fileId,
-        fileName: info.fileName,
-        size: info.size,
-        uploadedAt: info.uploadedAt,
-        serverAddress: info.serverAddress
-      });
-    }
-    return filesInfo;
   }
 
   async shutdown() {

@@ -2,6 +2,7 @@ const { v4: uuidv4 } = require('uuid');
 const fs = require('fs');
 const { PORT, SERVER_ADDRESS } = require('../config/constants');
 const { getMimeType } = require('../utils/mime-types');
+const db = require('../../db');
 
 class FileController {
   constructor(dhtService) {
@@ -32,6 +33,15 @@ class FileController {
       console.log(`   📁 Location: ${req.file.path}`);
       console.log(`   🔑 Generated File ID: ${fileId}`);
 
+      // Store in Cassandra database
+      await db.storeFileMetadata(
+        fileId,
+        req.file.path,
+        req.file.originalname,
+        req.file.size
+      );
+
+      // Announce to DHT network
       const dhtInfo = await this.dhtService.announceFile(
         fileId,
         req.file.path,
@@ -45,17 +55,22 @@ class FileController {
         fileName: req.file.originalname,
         size: req.file.size,
         uploadedAt: new Date().toISOString(),
+        storage: {
+          database: 'cassandra',
+          persisted: true
+        },
         dht: {
           announced: true,
           topic: dhtInfo.topic,
           serverAddress: dhtInfo.serverAddress
         },
         retrieveUrl: `http://localhost:${PORT}/retrieve/${fileId}`,
-        message: 'File uploaded and announced to DHT network successfully'
+        message: 'File uploaded, stored in Cassandra, and announced to DHT network'
       };
 
       console.log('\n✨ Upload complete! Sending response to client...');
       console.log(`   🔗 Retrieve URL: ${response.retrieveUrl}`);
+      console.log(`   💾 Stored in Cassandra: YES`);
       console.log('='.repeat(60) + '\n');
 
       res.status(200).json(response);
@@ -90,36 +105,30 @@ class FileController {
         });
       }
 
-      console.log(`\n🔍 Step 2: Performing DHT lookup`);
+      console.log(`\n🔍 Step 2: Querying Cassandra database`);
       
-      const hasFile = this.dhtService.hasFile(fileId);
+      // Query Cassandra instead of in-memory Map
+      const fileMetadata = await db.getFileMetadata(fileId);
       
-      if (!hasFile) {
-        console.log('   ❌ File not found on this server');
-        console.log(`   💡 This server (${SERVER_ADDRESS}) does not have file: ${fileId}`);
+      if (!fileMetadata) {
+        console.log('   ❌ File not found in database');
         
         return res.status(404).json({
           success: false,
           error: 'File not found',
-          message: `File with ID "${fileId}" not found on this server`,
-          serverAddress: SERVER_ADDRESS,
-          hint: 'The file may be on a different DHT node'
+          message: `File with ID "${fileId}" not found in database`,
+          hint: 'The file may have been deleted or never existed'
         });
       }
       
-      console.log(`   ✅ File found on this server (${SERVER_ADDRESS})`);
-
-      console.log(`\n📂 Step 3: Performing local file lookup`);
-      
-      const filePath = this.dhtService.getFilePath(fileId);
-      const fileMetadata = this.dhtService.getFileMetadata(fileId);
-      
-      console.log(`   📁 File Path: ${filePath}`);
+      console.log(`   ✅ File found in Cassandra database`);
       console.log(`   📄 File Name: ${fileMetadata.fileName}`);
-      console.log(`   📊 File Size: ${fileMetadata.size} bytes`);
+      console.log(`   📁 File Path: ${fileMetadata.filePath}`);
 
-      if (!fs.existsSync(filePath)) {
-        console.error('   ❌ File exists in DHT index but not on disk!');
+      console.log(`\n📂 Step 3: Verifying file on disk`);
+      
+      if (!fs.existsSync(fileMetadata.filePath)) {
+        console.error('   ❌ File exists in database but not on disk!');
         return res.status(500).json({
           success: false,
           error: 'File system error',
@@ -134,8 +143,9 @@ class FileController {
       res.setHeader('Content-Disposition', `attachment; filename="${fileMetadata.fileName}"`);
       res.setHeader('X-File-ID', fileId);
       res.setHeader('X-Server-Address', SERVER_ADDRESS);
+      res.setHeader('X-Storage-Type', 'cassandra');
       
-      res.download(filePath, fileMetadata.fileName, (err) => {
+      res.download(fileMetadata.filePath, fileMetadata.fileName, (err) => {
         if (err) {
           console.error('   ❌ Error sending file:', err.message);
           if (!res.headersSent) {
@@ -146,7 +156,7 @@ class FileController {
             });
           }
         } else {
-          console.log('   ✅ File sent successfully!');
+          console.log('   ✅ File sent successfully from persistent storage!');
           console.log('='.repeat(60) + '\n');
         }
       });
@@ -165,31 +175,48 @@ class FileController {
     }
   }
 
-  listFiles(req, res) {
-    const files = this.dhtService.getStoredFilesInfo();
-    res.json({
-      success: true,
-      count: files.length,
-      serverAddress: SERVER_ADDRESS,
-      files
-    });
+  async listFiles(req, res) {
+    try {
+      // Get files from Cassandra instead of in-memory Map
+      const files = await db.getAllFiles();
+      
+      res.json({
+        success: true,
+        count: files.length,
+        serverAddress: SERVER_ADDRESS,
+        storage: 'cassandra',
+        files
+      });
+    } catch (error) {
+      console.error('Error listing files:', error);
+      res.status(500).json({
+        success: false,
+        error: 'Failed to list files',
+        message: error.message
+      });
+    }
   }
 
   getHealth(req, res) {
     res.json({
       status: 'healthy',
       uptime: process.uptime(),
-      filesStored: this.dhtService.storedFiles.size,
+      storage: 'cassandra',
       timestamp: new Date().toISOString()
     });
   }
 
   getInfo(req, res) {
     res.json({
-      message: 'DHT File Upload & Retrieve Server',
-      version: '2.0.0',
+      message: 'DHT File Upload & Retrieve Server with Persistent Storage',
+      version: '3.0.0',
+      storage: {
+        type: 'cassandra',
+        persistent: true,
+        description: 'Files survive server restarts'
+      },
       endpoints: {
-        upload: 'POST /upload - Upload a file and announce to DHT',
+        upload: 'POST /upload - Upload a file and store in Cassandra',
         retrieve: 'GET /retrieve/:fileId - Download a file by ID',
         files: 'GET /files - List all stored files',
         health: 'GET /health - Server health check'
