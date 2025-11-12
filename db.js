@@ -1,41 +1,30 @@
 const cassandra = require('cassandra-driver');
 
-// ============================================================
-// CASSANDRA CLIENT CONFIGURATION
-// ============================================================
-
+// Use environment variables for Docker compatibility
 const client = new cassandra.Client({
-  contactPoints: ['127.0.0.1'],  // Cassandra server address
-  localDataCenter: 'datacenter1',  // Default datacenter name
-  keyspace: 'fs_metadata'  // Will be created if doesn't exist
+  contactPoints: [process.env.CASSANDRA_CONTACT_POINTS || '127.0.0.1'],
+  localDataCenter: process.env.CASSANDRA_LOCAL_DATACENTER || 'datacenter1',
+  keyspace: process.env.CASSANDRA_KEYSPACE || 'fs_metadata'
 });
 
-// ============================================================
-// DATABASE INITIALIZATION
-// ============================================================
-
-/**
- * Initialize the database: create keyspace and table
- * This should be called once when the server starts
- */
 async function initializeDatabase() {
   console.log('\n' + '='.repeat(60));
   console.log('🔧 INITIALIZING CASSANDRA DATABASE');
   console.log('='.repeat(60));
 
   try {
-    // Step 1: Connect without keyspace (to create it)
     console.log('\n📡 Step 1: Connecting to Cassandra...');
+    console.log(`   🔗 Contact Point: ${process.env.CASSANDRA_CONTACT_POINTS || '127.0.0.1'}`);
     
+    // Use environment variables here too
     const tempClient = new cassandra.Client({
-      contactPoints: ['127.0.0.1'],
-      localDataCenter: 'datacenter1'
+      contactPoints: [process.env.CASSANDRA_CONTACT_POINTS || '127.0.0.1'],
+      localDataCenter: process.env.CASSANDRA_LOCAL_DATACENTER || 'datacenter1'
     });
     
     await tempClient.connect();
     console.log('   ✅ Connected to Cassandra successfully!');
 
-    // Step 2: Create keyspace if it doesn't exist
     console.log('\n🗄️  Step 2: Creating keyspace "fs_metadata"...');
     
     const createKeyspaceQuery = `
@@ -49,7 +38,6 @@ async function initializeDatabase() {
     await tempClient.execute(createKeyspaceQuery);
     console.log('   ✅ Keyspace "fs_metadata" created/verified!');
 
-    // Step 3: Create table if it doesn't exist
     console.log('\n📋 Step 3: Creating table "files"...');
     
     const createTableQuery = `
@@ -65,11 +53,24 @@ async function initializeDatabase() {
     await tempClient.execute(createTableQuery);
     console.log('   ✅ Table "files" created/verified!');
 
-    // Close temporary client
+    console.log('\n📋 Step 4: Creating table "access_logs"...');
+    
+    const createLogsTableQuery = `
+      CREATE TABLE IF NOT EXISTS fs_metadata.access_logs (
+        log_id timeuuid PRIMARY KEY,
+        file_id text,
+        client_id text,
+        operation_type text,
+        timestamp timestamp
+      )
+    `;
+    
+    await tempClient.execute(createLogsTableQuery);
+    console.log('   ✅ Table "access_logs" created/verified!');
+
     await tempClient.shutdown();
 
-    // Step 4: Connect with keyspace
-    console.log('\n🔗 Step 4: Connecting to keyspace "fs_metadata"...');
+    console.log('\n🔗 Step 5: Connecting to keyspace "fs_metadata"...');
     await client.connect();
     console.log('   ✅ Connected to keyspace successfully!');
 
@@ -85,23 +86,10 @@ async function initializeDatabase() {
   }
 }
 
-// ============================================================
-// DATABASE OPERATIONS
-// ============================================================
-
-/**
- * Store file metadata in Cassandra
- * @param {string} fileId - Unique file identifier (UUID)
- * @param {string} filePath - Path to file on disk
- * @param {string} fileName - Original file name
- * @param {number} fileSize - File size in bytes
- * @returns {Promise<boolean>} - Success status
- */
 async function storeFileMetadata(fileId, filePath, fileName, fileSize) {
   console.log(`\n💾 Storing file metadata in Cassandra:`);
   console.log(`   🔑 File ID: ${fileId}`);
   console.log(`   📄 File Name: ${fileName}`);
-  console.log(`   📁 File Path: ${filePath}`);
 
   try {
     const query = `
@@ -122,11 +110,6 @@ async function storeFileMetadata(fileId, filePath, fileName, fileSize) {
   }
 }
 
-/**
- * Retrieve file metadata from Cassandra
- * @param {string} fileId - Unique file identifier
- * @returns {Promise<object|null>} - File metadata or null if not found
- */
 async function getFileMetadata(fileId) {
   console.log(`\n🔍 Retrieving file metadata from Cassandra:`);
   console.log(`   🔑 File ID: ${fileId}`);
@@ -159,10 +142,6 @@ async function getFileMetadata(fileId) {
   }
 }
 
-/**
- * Get all files from Cassandra
- * @returns {Promise<Array>} - Array of file metadata objects
- */
 async function getAllFiles() {
   console.log('\n📂 Retrieving all files from Cassandra...');
 
@@ -187,11 +166,6 @@ async function getAllFiles() {
   }
 }
 
-/**-*
- * Delete file metadata from Cassandra
- * @param {string} fileId - Unique file identifier
- * @returns {Promise<boolean>} - Success status
- */
 async function deleteFileMetadata(fileId) {
   console.log(`\n🗑️  Deleting file metadata from Cassandra:`);
   console.log(`   🔑 File ID: ${fileId}`);
@@ -209,11 +183,6 @@ async function deleteFileMetadata(fileId) {
   }
 }
 
-/**
- * Check if a file exists in Cassandra
- * @param {string} fileId - Unique file identifier
- * @returns {Promise<boolean>} - True if file exists
- */
 async function fileExists(fileId) {
   try {
     const query = 'SELECT file_id FROM files WHERE file_id = ?';
@@ -225,9 +194,68 @@ async function fileExists(fileId) {
   }
 }
 
-/**
- * Gracefully shutdown the Cassandra client
- */
+async function logAccess(fileId, clientId, operationType) {
+  try {
+    const query = `
+      INSERT INTO access_logs (log_id, file_id, client_id, operation_type, timestamp)
+      VALUES (now(), ?, ?, ?, toTimestamp(now()))
+    `;
+    
+    await client.execute(query, [fileId, clientId, operationType], { prepare: true });
+    
+    console.log(`   📝 Access logged: ${operationType} by ${clientId}`);
+    return true;
+    
+  } catch (error) {
+    console.error(`   ⚠️  Failed to log access:`, error.message);
+    return false;
+  }
+}
+
+async function getAccessLogs(fileId, limit = 100) {
+  try {
+    const query = `
+      SELECT log_id, file_id, client_id, operation_type, timestamp
+      FROM access_logs
+      WHERE file_id = ?
+      LIMIT ?
+    `;
+    
+    const result = await client.execute(query, [fileId, limit], { prepare: true });
+    
+    return result.rows.map(row => ({
+      logId: row.log_id,
+      fileId: row.file_id,
+      clientId: row.client_id,
+      operationType: row.operation_type,
+      timestamp: row.timestamp
+    }));
+    
+  } catch (error) {
+    console.error('Error retrieving access logs:', error.message);
+    throw error;
+  }
+}
+
+async function getAllAccessLogs(limit = 1000) {
+  try {
+    const query = 'SELECT * FROM access_logs LIMIT ?';
+    const result = await client.execute(query, [limit]);
+    
+    return result.rows.map(row => ({
+      logId: row.log_id.toString(),
+      fileId: row.file_id,
+      clientId: row.client_id,
+      operationType: row.operation_type,
+      timestamp: row.timestamp
+    }));
+    
+  } catch (error) {
+    console.error('Error retrieving all access logs:', error.message);
+    throw error;
+  }
+}
+
 async function shutdown() {
   console.log('\n👋 Shutting down Cassandra client...');
   try {
@@ -238,10 +266,6 @@ async function shutdown() {
   }
 }
 
-// ============================================================
-// EXPORTS
-// ============================================================
-
 module.exports = {
   initializeDatabase,
   storeFileMetadata,
@@ -249,6 +273,9 @@ module.exports = {
   getAllFiles,
   deleteFileMetadata,
   fileExists,
+  logAccess,
+  getAccessLogs,
+  getAllAccessLogs,
   shutdown,
-  client  // Export client for advanced usage if needed
+  client
 };

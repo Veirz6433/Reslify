@@ -1,0 +1,55 @@
+version: '3.8'
+
+services:
+  # Cassandra Database Service
+  cassandra:
+    image: cassandra:latest
+    container_name: dht-cassandra
+    hostname: cassandra
+    ports:
+      - "9042:9042"
+    environment:
+      - CASSANDRA_CLUSTER_NAME=DHT_Cluster
+      - CASSANDRA_DC=datacenter1
+      - CASSANDRA_ENDPOINT_SNITCH=GossipingPropertyFileSnitch
+    volumes:
+      - cassandra_data:/var/lib/cassandra
+    networks:
+      - dht-network
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'describe cluster'"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+  # Node.js Application Service
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dht-app
+    hostname: app
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - CASSANDRA_CONTACT_POINTS=cassandra
+      - CASSANDRA_LOCAL_DATACENTER=datacenter1
+      - CASSANDRA_KEYSPACE=fs_metadata
+    volumes:
+      - ./uploads:/app/uploads
+    networks:
+      - dht-network
+    depends_on:
+      cassandra:
+        condition: service_healthy
+    restart: unless-stopped
+
+networks:
+  dht-network:
+    driver: bridge
+
+volumes:
+  cassandra_data:
+    driver: local

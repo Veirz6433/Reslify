@@ -33,7 +33,6 @@ class FileController {
       console.log(`   📁 Location: ${req.file.path}`);
       console.log(`   🔑 Generated File ID: ${fileId}`);
 
-      // Store in Cassandra database
       await db.storeFileMetadata(
         fileId,
         req.file.path,
@@ -41,7 +40,6 @@ class FileController {
         req.file.size
       );
 
-      // Announce to DHT network
       const dhtInfo = await this.dhtService.announceFile(
         fileId,
         req.file.path,
@@ -107,7 +105,6 @@ class FileController {
 
       console.log(`\n🔍 Step 2: Querying Cassandra database`);
       
-      // Query Cassandra instead of in-memory Map
       const fileMetadata = await db.getFileMetadata(fileId);
       
       if (!fileMetadata) {
@@ -136,8 +133,18 @@ class FileController {
         });
       }
 
-      console.log(`\n📤 Step 4: Sending file to client`);
+      // NEW: Log the access (fire-and-forget pattern)
+      console.log(`\n📝 Step 4: Logging access...`);
+      const clientIp = req.ip || req.connection.remoteAddress || 'unknown';
+      
+      // Fire-and-forget: don't await, catch errors silently
+      db.logAccess(fileId, clientIp, 'read').catch(err => {
+        console.error('   ⚠️  Logging failed (non-critical):', err.message);
+      });
+
+      console.log(`\n📤 Step 5: Sending file to client`);
       console.log(`   ✅ Initiating file download: ${fileMetadata.fileName}`);
+      console.log(`   👤 Client: ${clientIp}`);
       
       res.setHeader('Content-Type', getMimeType(fileMetadata.fileName));
       res.setHeader('Content-Disposition', `attachment; filename="${fileMetadata.fileName}"`);
@@ -177,7 +184,6 @@ class FileController {
 
   async listFiles(req, res) {
     try {
-      // Get files from Cassandra instead of in-memory Map
       const files = await db.getAllFiles();
       
       res.json({
@@ -197,28 +203,57 @@ class FileController {
     }
   }
 
+  // NEW: Get access logs endpoint
+  async getAccessLogs(req, res) {
+    try {
+      const limit = parseInt(req.query.limit) || 100;
+      const logs = await db.getAllAccessLogs(limit);
+      
+      res.json({
+        success: true,
+        count: logs.length,
+        limit,
+        logs
+      });
+    } catch (error) {
+      console.error('Error getting access logs:', error);
+      res.status(500).json({
+        success: false,
+        error: 'Failed to get access logs',
+        message: error.message
+      });
+    }
+  }
+
   getHealth(req, res) {
     res.json({
       status: 'healthy',
       uptime: process.uptime(),
       storage: 'cassandra',
+      logging: 'enabled',
       timestamp: new Date().toISOString()
     });
   }
 
   getInfo(req, res) {
     res.json({
-      message: 'DHT File Upload & Retrieve Server with Persistent Storage',
-      version: '3.0.0',
+      message: 'DHT File Upload & Retrieve Server with Access Logging',
+      version: '3.1.0',
       storage: {
         type: 'cassandra',
         persistent: true,
         description: 'Files survive server restarts'
       },
+      features: {
+        accessLogging: true,
+        dhtRehydration: true,
+        persistentStorage: true
+      },
       endpoints: {
         upload: 'POST /upload - Upload a file and store in Cassandra',
         retrieve: 'GET /retrieve/:fileId - Download a file by ID',
         files: 'GET /files - List all stored files',
+        logs: 'GET /logs - View access logs',
         health: 'GET /health - Server health check'
       }
     });
